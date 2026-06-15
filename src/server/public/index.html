@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Doodoo fart alcohol finder</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,900&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #f3e9d6;
+    --ink-dim: #a99a7e;
+    --bg: #15110b;
+    --panel: #1e1810;
+    --panel-2: #261e13;
+    --line: #3a2f1d;
+    --amber: #e0a93f;
+    --amber-soft: #c98e2e;
+    --new: #8fd0a0;
+    --known: #7c6f57;
+    --err: #e08a6a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); }
+  body {
+    font-family: "DM Mono", ui-monospace, monospace;
+    font-size: 14px; line-height: 1.5;
+    background-image:
+      radial-gradient(1200px 500px at 80% -10%, rgba(224,169,63,.10), transparent 60%),
+      radial-gradient(900px 400px at -10% 110%, rgba(224,169,63,.06), transparent 60%);
+    min-height: 100vh;
+  }
+  body::after {
+    content: ""; position: fixed; inset: 0; pointer-events: none; opacity: .035;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  header {
+    padding: 38px clamp(20px, 5vw, 64px) 26px;
+    border-bottom: 1px solid var(--line);
+    display: flex; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; gap: 20px;
+  }
+  .brand { display: flex; flex-direction: column; gap: 4px; }
+  .brand h1 {
+    font-family: "Fraunces", serif; font-weight: 900; font-size: clamp(30px, 5vw, 52px);
+    margin: 0; letter-spacing: -.01em; line-height: .95;
+  }
+  .brand h1 em { font-style: italic; font-weight: 400; color: var(--amber); }
+  .brand p { margin: 0; color: var(--known); font-size: 12px; letter-spacing: .14em; text-transform: uppercase; }
+  .controls { display: flex; gap: 12px; align-items: center; }
+  button {
+    font-family: "DM Mono", monospace; font-size: 13px; cursor: pointer;
+    padding: 12px 18px; border-radius: 2px; border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--ink); transition: .15s; letter-spacing: .04em;
+  }
+  button:hover:not(:disabled) { border-color: var(--amber); color: var(--amber); }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.primary { background: var(--amber); color: #1a1305; border-color: var(--amber); font-weight: 500; }
+  button.primary:hover:not(:disabled) { background: var(--amber-soft); color: #140e02; }
+  button.danger:hover:not(:disabled) { border-color: var(--err); color: var(--err); }
+
+  main { padding: 28px clamp(20px, 5vw, 64px) 80px; display: grid; gap: 26px;
+          grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 3px; overflow: hidden; }
+  .panel > h2 {
+    font-family: "Fraunces", serif; font-weight: 600; font-size: 17px; margin: 0;
+    padding: 16px 20px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: baseline;
+  }
+  .panel > h2 .meta { font-family: "DM Mono", monospace; font-size: 11px; color: var(--known); letter-spacing: .08em; }
+
+  .statbar { display: flex; gap: 0; border-bottom: 1px solid var(--line); }
+  .statbar div { flex: 1; padding: 14px 18px; border-right: 1px solid var(--line); }
+  .statbar div:last-child { border-right: none; }
+  .statbar .n { font-family: "Fraunces", serif; font-size: 28px; font-weight: 900; line-height: 1; }
+  .statbar .k { font-size: 10px; text-transform: uppercase; letter-spacing: .16em; color: var(--known); margin-top: 6px; }
+  .statbar .new .n { color: var(--new); }
+  .statbar .amber .n { color: var(--amber); }
+
+  .mode-pill { font-size: 10px; padding: 3px 9px; border-radius: 99px; letter-spacing: .12em; text-transform: uppercase; }
+  .mode-pill.test { background: rgba(143,208,160,.14); color: var(--new); border: 1px solid rgba(143,208,160,.3); }
+  .mode-pill.live { background: rgba(224,169,63,.16); color: var(--amber); border: 1px solid rgba(224,169,63,.35); }
+  .dot { width: 7px; height: 7px; border-radius: 99px; display: inline-block; background: var(--known); }
+  .dot.running { background: var(--amber); animation: pulse 1s infinite; }
+  .dot.done { background: var(--new); }
+  .dot.error { background: var(--err); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+
+  ul.products { list-style: none; margin: 0; padding: 6px; max-height: 56vh; overflow-y: auto; }
+  ul.products li {
+    padding: 13px 14px; border-radius: 2px; border: 1px solid transparent;
+    display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; animation: rise .35s ease both;
+  }
+  ul.products li:hover { background: var(--panel-2); border-color: var(--line); }
+  @keyframes rise { from { opacity: 0; transform: translateY(6px); } }
+  .pname { font-family: "Fraunces", serif; font-size: 16px; font-weight: 600; }
+  .pmeta { color: var(--known); font-size: 12px; grid-column: 1 / -1; display: flex; gap: 14px; flex-wrap: wrap; }
+  .pmeta a { color: var(--amber-soft); text-decoration: none; }
+  .pmeta a:hover { text-decoration: underline; }
+  .src-tag { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--known);
+             border: 1px solid var(--line); padding: 2px 7px; border-radius: 2px; white-space: nowrap; align-self: start; }
+
+  pre.log {
+    margin: 0; padding: 16px 20px; font-size: 11.5px; color: var(--known);
+    max-height: 30vh; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+  }
+  pre.log b { color: var(--amber); font-weight: 500; }
+  .empty { padding: 40px 20px; text-align: center; color: var(--known); font-style: italic; font-family: "Fraunces", serif; }
+  .runs-list { list-style: none; margin: 0; padding: 6px; max-height: 24vh; overflow-y: auto; }
+  .runs-list li { padding: 8px 12px; display: flex; gap: 10px; align-items: center; font-size: 12px; cursor: pointer; border-radius: 2px; }
+  .runs-list li:hover { background: var(--panel-2); }
+  .runs-list li.active { background: var(--panel-2); border-left: 2px solid var(--amber); }
+  .runs-list .when { color: var(--known); margin-left: auto; }
+
+  /* Sources panel */
+  .sources-list { list-style: none; margin: 0; padding: 6px; max-height: 26vh; overflow-y: auto; }
+  .sources-list li { padding: 9px 12px; display: flex; gap: 10px; align-items: center; font-size: 12px; border-radius: 2px; }
+  .sources-list li:hover { background: var(--panel-2); }
+  .sources-list .slabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sources-list .right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  .sources-list button.mini { padding: 4px 10px; font-size: 11px; }
+  .kind-pill { font-size: 9px; padding: 2px 7px; border-radius: 99px; letter-spacing: .1em; text-transform: uppercase;
+               border: 1px solid var(--line); color: var(--known); white-space: nowrap; }
+  .add-source { padding: 14px 16px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
+  .add-source .row { display: flex; gap: 8px; }
+  .add-source input {
+    flex: 1; min-width: 0; font-family: "DM Mono", monospace; font-size: 12.5px;
+    padding: 10px 12px; border-radius: 2px; border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--ink);
+  }
+  .add-source input:focus { outline: none; border-color: var(--amber); }
+  .add-source .status { font-size: 11.5px; color: var(--known); }
+  .add-source .status.err { color: var(--err); }
+  .analysis { border: 1px solid var(--line); border-radius: 2px; padding: 12px 14px;
+              display: flex; flex-direction: column; gap: 10px; background: var(--panel-2); }
+  .analysis .head { display: flex; gap: 10px; align-items: baseline; }
+  .analysis .head b { font-family: "Fraunces", serif; font-size: 15px; font-weight: 600; }
+  .analysis .reason { font-size: 11.5px; color: var(--known); }
+  .analysis label { font-size: 10px; text-transform: uppercase; letter-spacing: .14em; color: var(--known);
+                    display: flex; flex-direction: column; gap: 5px; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <h1>Doodoo fart<em> alcohol finder</em></h1>
+      <p>number 1 promoter of alcoholism and cirrhosis</p>
+    </div>
+    <div class="controls">
+      <button id="btn-test" class="primary">▶ Run test (1–2 min, no writes)</button>
+      <button id="btn-live" class="danger">Run live →</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel" id="run-panel">
+      <h2>
+        <span>Current run <span id="run-mode"></span></span>
+        <span class="meta"><span class="dot" id="run-dot"></span> <span id="run-status">idle</span></span>
+      </h2>
+      <div class="statbar">
+        <div class="amber"><div class="n" id="s-cand">—</div><div class="k">candidates</div></div>
+        <div class="new"><div class="n" id="s-new">—</div><div class="k">new products</div></div>
+        <div><div class="n" id="s-known">—</div><div class="k">already known</div></div>
+      </div>
+      <ul class="products" id="products">
+        <li class="empty" style="grid-template-columns:1fr">Run a test to scout for new products. Nothing is written to the database in test mode.</li>
+      </ul>
+    </section>
+
+    <div style="display:flex; flex-direction:column; gap:26px; min-width:0;">
+      <section class="panel">
+        <h2>Activity log</h2>
+        <pre class="log" id="log">—</pre>
+      </section>
+      <section class="panel">
+        <h2>Recent runs</h2>
+        <ul class="runs-list" id="runs"></ul>
+      </section>
+      <section class="panel">
+        <h2>Sources <span class="meta">paste a URL to add one</span></h2>
+        <ul class="sources-list" id="sources"></ul>
+        <div class="add-source">
+          <div class="row">
+            <input id="src-url" type="text" placeholder="https://example.com — site to scout for new products" spellcheck="false" />
+            <button id="btn-analyze">Analyze</button>
+          </div>
+          <div class="status" id="src-status"></div>
+          <div id="src-analysis"></div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let activeRunId = null;
+let pollTimer = null;
+
+async function startRun(mode, sources) {
+  setBusy(true);
+  const res = await fetch('/api/runs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode, sources })
+  });
+  const { runId } = await res.json();
+  activeRunId = runId;
+  poll();
+}
+
+function setBusy(b) { $('btn-test').disabled = b; $('btn-live').disabled = b; }
+
+async function poll() {
+  if (!activeRunId) return;
+  const run = await (await fetch('/api/runs/' + activeRunId)).json();
+  render(run);
+  if (run.status === 'running') {
+    pollTimer = setTimeout(poll, 1000);
+  } else {
+    setBusy(false);
+    loadRuns();
+  }
+}
+
+function render(run) {
+  $('run-mode').innerHTML = run.mode
+    ? `<span class="mode-pill ${run.mode}">${run.mode === 'test' ? 'dry-run' : 'live'}</span>` : '';
+  $('run-dot').className = 'dot ' + run.status;
+  $('run-status').textContent = run.status + (run.mode === 'test' && run.status==='done' ? ' · nothing written' : '');
+  $('s-cand').textContent = run.candidates ?? 0;
+  $('s-new').textContent = run.newProducts ? run.newProducts.length : 0;
+  $('s-known').textContent = run.knownCount ?? 0;
+
+  const ul = $('products');
+  const items = run.newProducts || [];
+  if (!items.length && run.status !== 'running') {
+    ul.innerHTML = '<li class="empty" style="grid-template-columns:1fr">No new products this run — everything found was already in the database.</li>';
+  } else if (items.length) {
+    ul.innerHTML = items.map(p => {
+      const name = [p.brand, p.productName].filter(Boolean).join(' — ') || '(unnamed)';
+      const bits = [];
+      if (p.producer) bits.push(p.producer);
+      if (p.beverageClass) bits.push(p.beverageClass);
+      if (p.origin) bits.push(p.origin);
+      if (p.sourceUrl) bits.push(`<a href="${p.sourceUrl}" target="_blank" rel="noopener">source ↗</a>`);
+      return `<li>
+        <span class="pname">${esc(name)}</span>
+        <span class="src-tag">${esc(p.source)}</span>
+        <span class="pmeta">${bits.join('<span>·</span>')}</span>
+      </li>`;
+    }).join('');
+  }
+
+  $('log').innerHTML = (run.log || []).map(l =>
+    l.replace(/(NEW|TEST MODE|persisted|new=\d+)/g, '<b>$1</b>')
+  ).join('\n') || '—';
+}
+
+async function loadRuns() {
+  const runs = await (await fetch('/api/runs')).json();
+  $('runs').innerHTML = runs.map(r => `
+    <li class="${r.runId === activeRunId ? 'active' : ''}" onclick="select('${r.runId}')">
+      <span class="dot ${r.status}"></span>
+      <span class="mode-pill ${r.mode}">${r.mode === 'test' ? 'dry' : 'live'}</span>
+      <span>${r.newProducts ? r.newProducts.length : 0} new</span>
+      <span class="when">${new Date(r.startedAt).toLocaleTimeString()}</span>
+    </li>`).join('') || '<li class="empty">No runs yet.</li>';
+}
+
+async function select(id) {
+  if (pollTimer) clearTimeout(pollTimer);
+  activeRunId = id;
+  const run = await (await fetch('/api/runs/' + id).then(r => r.json()));
+  render(run);
+  if (run.status === 'running') poll(); else loadRuns();
+}
+
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+// ---------- Sources panel ----------
+let pendingAnalysis = null;
+
+async function loadSources() {
+  const sources = await (await fetch('/api/sources')).json();
+  $('sources').innerHTML = sources.map(s => `
+    <li>
+      <span class="dot ${s.enabled ? 'done' : ''}" title="${s.enabled ? 'enabled' : 'missing credentials / key'}"></span>
+      <span class="slabel" title="${esc(s.id)}">${esc(s.label)}</span>
+      <span class="right">
+        ${s.kind ? `<span class="kind-pill">${esc(s.kind)}</span>` : ''}
+        <button class="mini" onclick="testSource('${esc(s.id)}')" ${s.enabled ? '' : 'disabled'}>test</button>
+      </span>
+    </li>`).join('') || '<li class="empty">No sources registered.</li>';
+}
+
+function testSource(id) { startRun('test', [id]); }
+
+function srcStatus(msg, isErr) {
+  const el = $('src-status');
+  el.textContent = msg || '';
+  el.className = 'status' + (isErr ? ' err' : '');
+}
+
+async function analyzeSource() {
+  const url = $('src-url').value.trim();
+  if (!url) return;
+  pendingAnalysis = null;
+  $('src-analysis').innerHTML = '';
+  $('btn-analyze').disabled = true;
+  srcStatus('Analyzing — the agent is reading the site and hunting for API docs (30–90s)…');
+  try {
+    const res = await fetch('/api/sources/analyze', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url })
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.statusText);
+    pendingAnalysis = body;
+    srcStatus('');
+    renderAnalysis(body);
+  } catch (e) {
+    srcStatus('Analysis failed: ' + e.message, true);
+  } finally {
+    $('btn-analyze').disabled = false;
+  }
+}
+
+function renderAnalysis(a) {
+  // Only the credential fields this source actually needs get an input:
+  // none for agentic/open APIs, one for an API key, two for login+password, etc.
+  const creds = a.kind === 'api' ? (a.api.credentials || []) : [];
+  $('src-analysis').innerHTML = `
+    <div class="analysis">
+      <div class="head">
+        <b>${esc(a.label)}</b>
+        <span class="kind-pill">${esc(a.kind)}</span>
+      </div>
+      <div class="reason">${esc(a.reason)}</div>
+      ${a.kind === 'api' ? `<div class="reason">endpoint: ${esc(a.api.baseUrl)}${esc(a.api.listPath)}</div>` : ''}
+      ${creds.map(c => `
+        <label>${esc(c.label)}
+          <input type="${c.secret ? 'password' : 'text'}" data-cred="${esc(c.field)}"
+                 placeholder="${esc(c.hint || c.field)}" spellcheck="false" autocomplete="off" />
+        </label>`).join('')}
+      <div class="row" style="display:flex; gap:8px;">
+        <button class="primary" id="btn-add-source">Add source</button>
+        <button id="btn-cancel-source">Cancel</button>
+      </div>
+    </div>`;
+  $('btn-add-source').onclick = addSource;
+  $('btn-cancel-source').onclick = () => { pendingAnalysis = null; $('src-analysis').innerHTML = ''; srcStatus(''); };
+}
+
+async function addSource() {
+  if (!pendingAnalysis) return;
+  const credentials = {};
+  for (const input of document.querySelectorAll('#src-analysis [data-cred]')) {
+    credentials[input.dataset.cred] = input.value;
+  }
+  $('btn-add-source').disabled = true;
+  srcStatus('Generating connector…');
+  try {
+    const res = await fetch('/api/sources', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: pendingAnalysis.url, analysis: pendingAnalysis, credentials })
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.statusText);
+    pendingAnalysis = null;
+    $('src-analysis').innerHTML = '';
+    $('src-url').value = '';
+    srcStatus(`Added ${body.label}${body.enabled ? '' : ' (disabled — credentials missing)'}.`);
+    loadSources();
+  } catch (e) {
+    srcStatus('Adding failed: ' + e.message, true);
+    const btn = $('btn-add-source');
+    if (btn) btn.disabled = false;
+  }
+}
+
+$('btn-analyze').onclick = analyzeSource;
+$('src-url').addEventListener('keydown', (e) => { if (e.key === 'Enter') analyzeSource(); });
+
+$('btn-test').onclick = () => startRun('test');
+$('btn-live').onclick = () => { if (confirm('Live run WILL write new products to the database. Continue?')) startRun('live'); };
+loadRuns();
+loadSources();
+</script>
+</body>
+</html>
