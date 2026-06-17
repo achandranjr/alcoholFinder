@@ -1,12 +1,13 @@
 import type { Source } from '../types.js';
 import { colaCloud } from './colaCloud.js';
+import { openBreweryDb } from './openBreweryDb.js';
 import { agenticWeb } from './agenticWeb.js';
 
-// COLA Cloud is the primary, authoritative product feed; the agentic web source
-// covers the long tail (producers/importers/distributors without an API).
-// User-added sources (src/sources/custom/) are registered on top at startup —
-// see customSources.ts.
-const registry: Source[] = [colaCloud, agenticWeb];
+// COLA Cloud is the primary, authoritative product feed; Open Brewery DB is the
+// free, keyless baseline that always runs; the agentic web source covers the
+// long tail (producers/importers/distributors without an API). User-added
+// sources are loaded from the DB on top at startup — see customSources.ts.
+const registry: Source[] = [colaCloud, openBreweryDb, agenticWeb];
 
 export function allSources(): Source[] {
   return [...registry];

@@ -8,7 +8,7 @@ const schema = z.object({
   ANTHROPIC_MODEL: z.string().default('claude-opus-4-8'),
 
   COLACLOUD_API_KEY: z.string().optional().default(''),
-  COLACLOUD_BASE_URL: z.string().default('https://colacloud.us/api'),
+  COLACLOUD_BASE_URL: z.string().default('https://app.colacloud.us/api/v1'),
 
   OPENBREWERYDB_BASE_URL: z.string().default('https://api.openbrewerydb.org/v1'),
 
