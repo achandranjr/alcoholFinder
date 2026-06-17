@@ -1,5 +1,6 @@
 import { discover } from './agent/orchestrator.js';
 import { loadCustomSources } from './sources/customSources.js';
+import { loadCredentials } from './credentials.js';
 import { pool } from './db.js';
 
 async function main() {
@@ -14,9 +15,10 @@ async function main() {
   const srcArg = args.find((a) => a.startsWith('--sources='));
   const onlySources = srcArg ? srcArg.split('=')[1]!.split(',') : undefined;
 
+  await loadCredentials();
   await loadCustomSources();
 
-  console.log(`Starting ${test ? 'TEST (dry-run, no DB writes)' : 'LIVE'} discovery...`);
+  console.log(`Starting ${test ? 'TEST (dry-run, no product writes)' : 'LIVE'} discovery...`);
   const run = await discover({ test, onlySources });
 
   console.log('\n--- log ---');

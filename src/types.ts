@@ -20,7 +20,7 @@ export interface KeyedCandidate extends ProductCandidate {
   dedupKey: string;
 }
 
-/** A credential the user must supply for a source (name/label only — values live in data/credentials.json). */
+/** A credential the user must supply for a source (name/label only — values live in the source_credentials table). */
 export interface CredentialField {
   /** Storage key, e.g. "API_KEY", "USERNAME". */
   field: string;
@@ -69,9 +69,15 @@ export interface DiscoveryBudget {
 export interface RunResult {
   runId: string;
   mode: 'live' | 'test';
-  startedAt: string;
+  /** ISO timestamp the run was enqueued. */
+  createdAt: string;
+  /** ISO timestamp the pipeline actually began (set when a worker claims it). */
+  startedAt?: string;
   finishedAt?: string;
-  status: 'running' | 'done' | 'error';
+  /** queued -> running -> done|error. 'queued' runs are waiting for the worker. */
+  status: 'queued' | 'running' | 'done' | 'error';
+  /** When set, the run is restricted to these source ids (per-source test button). */
+  onlySources?: string[];
   sourcesRun: string[];
   candidates: number;
   newProducts: KeyedCandidate[];   // the interesting output for the dashboard

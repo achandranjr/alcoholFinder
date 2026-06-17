@@ -1,0 +1,51 @@
+name: Discovery
+
+# Runs the discovery pipeline on a schedule, replacing the always-on worker.
+# The CLI (`npm run discover`) runs the SAME pipeline inline as the worker would
+# (src/cli.ts -> orchestrator.discover), creating a `runs` row and flushing
+# progress to Supabase — so the Vercel dashboard still shows status/history.
+#
+# GitHub Actions jobs may run up to 6h, so the pipeline's ~10-min cap is fine.
+
+on:
+  schedule:
+    # IMPORTANT: GitHub Actions cron is always UTC and does NOT observe daylight
+    # saving. These are set for US Central DAYLIGHT time (CDT, UTC-5) = 8 AM / 8 PM CT.
+    #   8 AM CDT = 13:00 UTC      8 PM CDT = 01:00 UTC (next day)
+    # When CT falls back to STANDARD time (CST, UTC-6) in early November, shift
+    # both one hour later: '0 14 * * *' (8 AM) and '0 2 * * *' (8 PM). Revert in spring.
+    - cron: '0 13 * * *'   # 8 AM CT
+    - cron: '0 1 * * *'    # 8 PM CT
+  workflow_dispatch:        # also allow a manual "Run workflow" from the Actions tab
+
+# Don't let a slow run overlap with the next scheduled one.
+concurrency:
+  group: discovery
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20      # headroom over the pipeline's internal ~10-min deadline
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Disable install scripts — matches the repo's supply-chain hygiene (README).
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run live discovery
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # Optional — sources with a missing key are skipped automatically.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          COLACLOUD_API_KEY: ${{ secrets.COLACLOUD_API_KEY }}
+        run: npm run discover

@@ -1,7 +1,6 @@
 import { enabledSources } from '../sources/index.js';
 import { keyAll } from '../dedup.js';
-import { findExistingKeys, insertProducts, recordLiveRun } from '../db.js';
-import { runStore } from '../run-store.js';
+import { findExistingKeys, insertProducts, saveRun, createRunningRun } from '../db.js';
 import type { RunResult, Source, DiscoveryBudget } from '../types.js';
 
 export interface DiscoverOptions {
@@ -13,16 +12,13 @@ export interface DiscoverOptions {
   onlySources?: string[];
 }
 
-/** Create a run and launch the pipeline in the background. Returns immediately. */
-export function startDiscovery(opts: DiscoverOptions): RunResult {
-  const run = runStore.create(opts.test ? 'test' : 'live');
-  void runPipeline(run, opts);
-  return run;
-}
-
-/** Create a run and await full completion. Used by the CLI. */
+/**
+ * Create a run row and run it to completion inline. Used by the CLI. The web
+ * layer does NOT use this — it enqueues (db.enqueueRun) and lets the worker
+ * pick the run up, because a serverless request can't host a long background job.
+ */
 export async function discover(opts: DiscoverOptions): Promise<RunResult> {
-  const run = runStore.create(opts.test ? 'test' : 'live');
+  const run = await createRunningRun(opts.test ? 'test' : 'live', opts.onlySources);
   await runPipeline(run, opts);
   return run;
 }
@@ -31,10 +27,16 @@ export async function discover(opts: DiscoverOptions): Promise<RunResult> {
  * THE discovery flow. Live and test runs are identical except for one thing:
  * a live run persists new products; a test run does not. Both read the DB to
  * determine what counts as "new".
+ *
+ * Progress is flushed to the run's row (db.saveRun) at each step so the
+ * dashboard — which now reads run state from the DB, not process memory — shows
+ * live progress while a separate worker executes this.
  */
-async function runPipeline(run: RunResult, opts: DiscoverOptions): Promise<void> {
-  const startedAt = new Date();
+export async function runPipeline(run: RunResult, opts: DiscoverOptions): Promise<void> {
+  const flush = () => saveRun(run);
   const log = (m: string) => { run.log.push(`[${new Date().toISOString()}] ${m}`); };
+
+  run.status = 'running';
 
   const timeoutMs = opts.timeoutMs ?? (opts.test ? 90_000 : 10 * 60_000);
   const deadline = Date.now() + timeoutMs;
@@ -50,6 +52,7 @@ async function runPipeline(run: RunResult, opts: DiscoverOptions): Promise<void>
   }
 
   log(`mode=${run.mode} sources=[${sources.map((s) => s.id).join(', ')}] timeout=${timeoutMs}ms`);
+  await flush();
 
   try {
     // 1) Gather candidates from each source under a per-source budget.
@@ -65,6 +68,7 @@ async function runPipeline(run: RunResult, opts: DiscoverOptions): Promise<void>
       } catch (err) {
         log(`${src.id}: ERROR ${(err as Error).message}`);
       }
+      await flush(); // surface per-source progress to the dashboard
     }
 
     // 2) Normalize + key (also de-dupes within the run).
@@ -78,20 +82,14 @@ async function runPipeline(run: RunResult, opts: DiscoverOptions): Promise<void>
     run.newProducts = fresh;
     run.knownCount = keyed.length - fresh.length;
     log(`candidates=${keyed.length} new=${fresh.length} known=${run.knownCount}`);
+    await flush();
 
-    // 4) Persist — LIVE ONLY. Test runs deliberately skip every write.
+    // 4) Persist — LIVE ONLY. Test runs deliberately skip every write to products.
     if (opts.test) {
-      log('TEST MODE: skipping all DB writes.');
+      log('TEST MODE: skipping all product writes.');
     } else {
       const inserted = await insertProducts(fresh);
       log(`persisted ${inserted} new products`);
-      await recordLiveRun({
-        sourcesRun: run.sourcesRun,
-        candidates: run.candidates,
-        newProducts: fresh.length,
-        startedAt,
-        finishedAt: new Date(),
-      });
     }
 
     run.status = 'done';
@@ -101,5 +99,7 @@ async function runPipeline(run: RunResult, opts: DiscoverOptions): Promise<void>
     run.error = (err as Error).message;
     run.finishedAt = new Date().toISOString();
     log(`FATAL ${run.error}`);
+  } finally {
+    await flush();
   }
 }

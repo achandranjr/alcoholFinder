@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Autonomous agentic discovery of new alcohol products into a local Postgres DB.",
+  "description": "Autonomous agentic discovery of new alcohol products into Supabase Postgres. Web/API on Vercel; discovery on a separate worker.",
   "engines": {
     "node": ">=20.11.0"
   },
@@ -12,6 +12,11 @@
     "discover": "tsx src/cli.ts discover",
     "test-run": "tsx src/cli.ts discover --test",
     "server": "tsx src/server/index.ts",
+    "worker": "tsx src/worker.ts",
+    "build": "tsc --outDir dist && cp -r src/server/public dist/server/public",
+    "build:vercel": "npm run build && mkdir -p public && cp src/server/public/index.html public/index.html",
+    "start": "node dist/server/index.js",
+    "start:worker": "node dist/worker.js",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

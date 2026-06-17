@@ -1,8 +1,20 @@
 import pg from 'pg';
 import { config } from './config.js';
-import type { KeyedCandidate } from './types.js';
+import type { KeyedCandidate, RunResult } from './types.js';
 
-export const pool = new pg.Pool({ connectionString: config.DATABASE_URL });
+// Supabase (and most hosted Postgres) require TLS; local Postgres usually does
+// not. Auto-detect from the host so the same code works in dev and on Vercel.
+// (Supabase's certs chain through a pooler, so we don't verify the chain.)
+const isLocal = /(@|\/\/)(localhost|127\.0\.0\.1|0\.0\.0\.0)[:/]/.test(config.DATABASE_URL);
+export const pool = new pg.Pool({
+  connectionString: config.DATABASE_URL,
+  ssl: isLocal ? undefined : { rejectUnauthorized: false },
+  // Serverless invocations are short-lived; keep the pool tiny so we don't
+  // exhaust Supabase's connection limit across many cold functions.
+  max: Number(process.env.PGPOOL_MAX ?? 3),
+});
+
+/* ------------------------------------------------------------------ products */
 
 /**
  * Given a set of dedup keys, return the subset that already exists in the DB.
@@ -52,14 +64,193 @@ export async function insertProducts(items: KeyedCandidate[]): Promise<number> {
   return inserted;
 }
 
-export async function recordLiveRun(r: {
-  sourcesRun: string[]; candidates: number; newProducts: number; error?: string;
-  startedAt: Date; finishedAt: Date;
-}): Promise<void> {
+/* ---------------------------------------------------------------------- runs */
+
+interface RunRow {
+  run_id: string;
+  mode: 'live' | 'test';
+  status: RunResult['status'];
+  only_sources: string[] | null;
+  sources_run: string[];
+  candidates: number;
+  known_count: number;
+  new_products: KeyedCandidate[];
+  log: string[];
+  error: string | null;
+  created_at: Date;
+  started_at: Date | null;
+  finished_at: Date | null;
+}
+
+function rowToRun(r: RunRow): RunResult {
+  return {
+    runId: r.run_id,
+    mode: r.mode,
+    status: r.status,
+    onlySources: r.only_sources ?? undefined,
+    createdAt: r.created_at.toISOString(),
+    startedAt: r.started_at?.toISOString(),
+    finishedAt: r.finished_at?.toISOString(),
+    sourcesRun: r.sources_run ?? [],
+    candidates: r.candidates,
+    knownCount: r.known_count,
+    newProducts: r.new_products ?? [],
+    log: r.log ?? [],
+    error: r.error ?? undefined,
+  };
+}
+
+const RUN_COLUMNS =
+  'run_id, mode, status, only_sources, sources_run, candidates, known_count, ' +
+  'new_products, log, error, created_at, started_at, finished_at';
+
+/** Enqueue a run for the worker to pick up. The web layer's only write path. */
+export async function enqueueRun(
+  mode: 'live' | 'test',
+  onlySources?: string[],
+): Promise<RunResult> {
+  const { rows } = await pool.query<RunRow>(
+    `INSERT INTO runs (mode, status, only_sources)
+     VALUES ($1, 'queued', $2)
+     RETURNING ${RUN_COLUMNS}`,
+    [mode, onlySources ?? null],
+  );
+  return rowToRun(rows[0]!);
+}
+
+/** Create an already-running run (used by the CLI, which runs inline). */
+export async function createRunningRun(
+  mode: 'live' | 'test',
+  onlySources?: string[],
+): Promise<RunResult> {
+  const { rows } = await pool.query<RunRow>(
+    `INSERT INTO runs (mode, status, only_sources, started_at, claimed_at)
+     VALUES ($1, 'running', $2, now(), now())
+     RETURNING ${RUN_COLUMNS}`,
+    [mode, onlySources ?? null],
+  );
+  return rowToRun(rows[0]!);
+}
+
+/**
+ * Atomically claim the oldest queued run, flipping it to 'running'. Uses
+ * FOR UPDATE SKIP LOCKED so multiple workers never grab the same row.
+ * Returns null when the queue is empty.
+ */
+export async function claimNextRun(): Promise<RunResult | null> {
+  const { rows } = await pool.query<RunRow>(
+    `UPDATE runs SET status = 'running', claimed_at = now(), started_at = now()
+       WHERE run_id = (
+         SELECT run_id FROM runs
+           WHERE status = 'queued'
+           ORDER BY created_at
+           FOR UPDATE SKIP LOCKED
+           LIMIT 1
+       )
+     RETURNING ${RUN_COLUMNS}`,
+  );
+  return rows[0] ? rowToRun(rows[0]) : null;
+}
+
+/** Flush the mutable state of a run back to its row (progress + final result). */
+export async function saveRun(run: RunResult): Promise<void> {
   await pool.query(
-    `INSERT INTO discovery_runs
-       (started_at, finished_at, mode, sources_run, candidates, new_products, error)
-     VALUES ($1,$2,'live',$3,$4,$5,$6)`,
-    [r.startedAt, r.finishedAt, r.sourcesRun, r.candidates, r.newProducts, r.error ?? null],
+    `UPDATE runs SET
+       status       = $2,
+       sources_run  = $3,
+       candidates   = $4,
+       known_count  = $5,
+       new_products = $6::jsonb,
+       log          = $7::jsonb,
+       error        = $8,
+       finished_at  = $9
+     WHERE run_id = $1`,
+    [
+      run.runId,
+      run.status,
+      run.sourcesRun,
+      run.candidates,
+      run.knownCount,
+      JSON.stringify(run.newProducts),
+      JSON.stringify(run.log),
+      run.error ?? null,
+      run.finishedAt ?? null,
+    ],
+  );
+}
+
+export async function getRun(id: string): Promise<RunResult | null> {
+  // run_id is a uuid; a malformed id should be a clean miss, not a 500.
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return null;
+  const { rows } = await pool.query<RunRow>(
+    `SELECT ${RUN_COLUMNS} FROM runs WHERE run_id = $1`,
+    [id],
+  );
+  return rows[0] ? rowToRun(rows[0]) : null;
+}
+
+export async function listRuns(limit = 50): Promise<RunResult[]> {
+  const { rows } = await pool.query<RunRow>(
+    `SELECT ${RUN_COLUMNS} FROM runs ORDER BY created_at DESC LIMIT $1`,
+    [limit],
+  );
+  return rows.map(rowToRun);
+}
+
+/* -------------------------------------------------------------- credentials */
+
+/** Load every source's credentials into one map (sourceId -> {field: value}). */
+export async function loadAllCredentials(): Promise<Record<string, Record<string, string>>> {
+  const { rows } = await pool.query<{ source_id: string; creds: Record<string, string> }>(
+    'SELECT source_id, creds FROM source_credentials',
+  );
+  const out: Record<string, Record<string, string>> = {};
+  for (const r of rows) out[r.source_id] = r.creds ?? {};
+  return out;
+}
+
+/** Merge new credential values for a source (top-level JSON key merge). */
+export async function upsertCredentials(
+  sourceId: string,
+  creds: Record<string, string>,
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO source_credentials (source_id, creds, updated_at)
+       VALUES ($1, $2::jsonb, now())
+     ON CONFLICT (source_id) DO UPDATE
+       SET creds = source_credentials.creds || EXCLUDED.creds,
+           updated_at = now()`,
+    [sourceId, JSON.stringify(creds)],
+  );
+}
+
+/* ------------------------------------------------------------- custom sources */
+
+export interface CustomSourceRow {
+  id: string;
+  label: string;
+  kind: 'api' | 'agentic';
+  added_from: string;
+  analysis: unknown;
+}
+
+export async function loadAllCustomSources(): Promise<CustomSourceRow[]> {
+  const { rows } = await pool.query<CustomSourceRow>(
+    'SELECT id, label, kind, added_from, analysis FROM custom_sources ORDER BY created_at',
+  );
+  return rows;
+}
+
+export async function upsertCustomSource(row: CustomSourceRow): Promise<void> {
+  await pool.query(
+    `INSERT INTO custom_sources (id, label, kind, added_from, analysis, updated_at)
+       VALUES ($1, $2, $3, $4, $5::jsonb, now())
+     ON CONFLICT (id) DO UPDATE
+       SET label = EXCLUDED.label,
+           kind = EXCLUDED.kind,
+           added_from = EXCLUDED.added_from,
+           analysis = EXCLUDED.analysis,
+           updated_at = now()`,
+    [row.id, row.label, row.kind, row.added_from, JSON.stringify(row.analysis)],
   );
 }

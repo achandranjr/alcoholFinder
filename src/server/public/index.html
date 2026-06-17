@@ -48,6 +48,7 @@
   .brand h1 em { font-style: italic; font-weight: 400; color: var(--amber); }
   .brand p { margin: 0; color: var(--known); font-size: 12px; letter-spacing: .14em; text-transform: uppercase; }
   .controls { display: flex; gap: 12px; align-items: center; }
+  .sched-note { color: var(--known); font-size: 12px; letter-spacing: .04em; text-align: right; }
   button {
     font-family: "DM Mono", monospace; font-size: 13px; cursor: pointer;
     padding: 12px 18px; border-radius: 2px; border: 1px solid var(--line);
@@ -82,6 +83,7 @@
   .mode-pill.test { background: rgba(143,208,160,.14); color: var(--new); border: 1px solid rgba(143,208,160,.3); }
   .mode-pill.live { background: rgba(224,169,63,.16); color: var(--amber); border: 1px solid rgba(224,169,63,.35); }
   .dot { width: 7px; height: 7px; border-radius: 99px; display: inline-block; background: var(--known); }
+  .dot.queued { background: var(--known); animation: pulse 1.6s infinite; }
   .dot.running { background: var(--amber); animation: pulse 1s infinite; }
   .dot.done { background: var(--new); }
   .dot.error { background: var(--err); }
@@ -148,8 +150,8 @@
       <p>number 1 promoter of alcoholism and cirrhosis</p>
     </div>
     <div class="controls">
-      <button id="btn-test" class="primary">▶ Run test (1–2 min, no writes)</button>
-      <button id="btn-live" class="danger">Run live →</button>
+      <span class="sched-note">Discovery runs automatically<br>8 AM &amp; 8 PM CT</span>
+      <button id="btn-refresh">↻ Refresh</button>
     </div>
   </header>
 
@@ -165,7 +167,7 @@
         <div><div class="n" id="s-known">—</div><div class="k">already known</div></div>
       </div>
       <ul class="products" id="products">
-        <li class="empty" style="grid-template-columns:1fr">Run a test to scout for new products. Nothing is written to the database in test mode.</li>
+        <li class="empty" style="grid-template-columns:1fr">Discovery runs automatically twice a day (8 AM &amp; 8 PM CT). Select a run from “Recent runs” to view its results.</li>
       </ul>
     </section>
 
@@ -198,27 +200,25 @@ const $ = (id) => document.getElementById(id);
 let activeRunId = null;
 let pollTimer = null;
 
-async function startRun(mode, sources) {
-  setBusy(true);
-  const res = await fetch('/api/runs', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode, sources })
-  });
-  const { runId } = await res.json();
-  activeRunId = runId;
-  poll();
-}
+// A run is "in progress" while it's queued or running. Both states keep the
+// dashboard polling so a scheduled run that's executing shows live progress.
+const inProgress = (run) => run.status === 'queued' || run.status === 'running';
 
-function setBusy(b) { $('btn-test').disabled = b; $('btn-live').disabled = b; }
+// Re-fetch the latest runs and show the most recent. Discovery itself is driven
+// by the scheduled GitHub Actions job (see .github/workflows/discover.yml), so
+// the dashboard is a read-only monitor — it never starts runs.
+async function refresh() {
+  const runs = await loadRuns();
+  if (runs.length) select(runs[0].runId);
+}
 
 async function poll() {
   if (!activeRunId) return;
   const run = await (await fetch('/api/runs/' + activeRunId)).json();
   render(run);
-  if (run.status === 'running') {
+  if (inProgress(run)) {
     pollTimer = setTimeout(poll, 1000);
   } else {
-    setBusy(false);
     loadRuns();
   }
 }
@@ -227,14 +227,16 @@ function render(run) {
   $('run-mode').innerHTML = run.mode
     ? `<span class="mode-pill ${run.mode}">${run.mode === 'test' ? 'dry-run' : 'live'}</span>` : '';
   $('run-dot').className = 'dot ' + run.status;
-  $('run-status').textContent = run.status + (run.mode === 'test' && run.status==='done' ? ' · nothing written' : '');
+  const statusNote = run.status === 'queued' ? ' · queued'
+    : (run.mode === 'test' && run.status === 'done') ? ' · nothing written' : '';
+  $('run-status').textContent = run.status + statusNote;
   $('s-cand').textContent = run.candidates ?? 0;
   $('s-new').textContent = run.newProducts ? run.newProducts.length : 0;
   $('s-known').textContent = run.knownCount ?? 0;
 
   const ul = $('products');
   const items = run.newProducts || [];
-  if (!items.length && run.status !== 'running') {
+  if (!items.length && !inProgress(run)) {
     ul.innerHTML = '<li class="empty" style="grid-template-columns:1fr">No new products this run — everything found was already in the database.</li>';
   } else if (items.length) {
     ul.innerHTML = items.map(p => {
@@ -264,8 +266,9 @@ async function loadRuns() {
       <span class="dot ${r.status}"></span>
       <span class="mode-pill ${r.mode}">${r.mode === 'test' ? 'dry' : 'live'}</span>
       <span>${r.newProducts ? r.newProducts.length : 0} new</span>
-      <span class="when">${new Date(r.startedAt).toLocaleTimeString()}</span>
+      <span class="when">${new Date(r.startedAt || r.createdAt).toLocaleTimeString()}</span>
     </li>`).join('') || '<li class="empty">No runs yet.</li>';
+  return runs;
 }
 
 async function select(id) {
@@ -273,7 +276,7 @@ async function select(id) {
   activeRunId = id;
   const run = await (await fetch('/api/runs/' + id).then(r => r.json()));
   render(run);
-  if (run.status === 'running') poll(); else loadRuns();
+  if (inProgress(run)) poll(); else loadRuns();
 }
 
 function esc(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -289,12 +292,10 @@ async function loadSources() {
       <span class="slabel" title="${esc(s.id)}">${esc(s.label)}</span>
       <span class="right">
         ${s.kind ? `<span class="kind-pill">${esc(s.kind)}</span>` : ''}
-        <button class="mini" onclick="testSource('${esc(s.id)}')" ${s.enabled ? '' : 'disabled'}>test</button>
+        <span class="kind-pill" title="${s.enabled ? 'has the credentials it needs' : 'missing credentials / key'}">${s.enabled ? 'enabled' : 'disabled'}</span>
       </span>
     </li>`).join('') || '<li class="empty">No sources registered.</li>';
 }
-
-function testSource(id) { startRun('test', [id]); }
 
 function srcStatus(msg, isErr) {
   const el = $('src-status');
@@ -382,9 +383,8 @@ async function addSource() {
 $('btn-analyze').onclick = analyzeSource;
 $('src-url').addEventListener('keydown', (e) => { if (e.key === 'Enter') analyzeSource(); });
 
-$('btn-test').onclick = () => startRun('test');
-$('btn-live').onclick = () => { if (confirm('Live run WILL write new products to the database. Continue?')) startRun('live'); };
-loadRuns();
+$('btn-refresh').onclick = refresh;
+refresh();
 loadSources();
 </script>
 </body>
