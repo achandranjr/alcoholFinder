@@ -6,6 +6,7 @@ import { allSources } from '../sources/index.js';
 import { generateAndRegisterSource, loadCustomSources } from '../sources/customSources.js';
 import { setCredentials, loadCredentials } from '../credentials.js';
 import { enqueueRun, getRun, listRuns, pool } from '../db.js';
+import { config, has } from '../config.js';
 
 /**
  * The web/API layer. This runs on Vercel (and locally), so it must do ONLY fast
@@ -22,6 +23,27 @@ function init(): Promise<void> {
     await loadCredentials();
     await loadCustomSources();
   })());
+}
+
+// Trigger the discovery workflow via GitHub's workflow_dispatch API. Inputs are
+// always strings (a workflow_dispatch constraint). Succeeds on 204 No Content.
+async function dispatchWorkflow(inputs: { run_id: string; source: string; mode: string }): Promise<void> {
+  const res = await fetch(
+    `https://api.github.com/repos/${config.GITHUB_REPO}/actions/workflows/discover.yml/dispatches`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${config.GITHUB_TOKEN}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ ref: config.GITHUB_REF, inputs }),
+    },
+  );
+  if (!res.ok) {
+    throw new Error(`workflow_dispatch failed ${res.status}: ${await res.text().catch(() => '')}`);
+  }
 }
 
 const app = express();
@@ -48,6 +70,29 @@ app.post('/api/runs', async (req, res, next) => {
         ? req.body.sources.map(String)
         : undefined;
     const run = await enqueueRun(mode, onlySources);
+    res.json({ runId: run.runId, mode: run.mode, status: run.status });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// On-demand run from the dashboard. Enqueues a run row (so the dashboard can
+// poll it), then asks GitHub to dispatch the discovery workflow for that run —
+// `source` may be a single source id or "all". The actual work happens in the
+// parallel GitHub Actions jobs, not here. Body: { source?, mode?: 'live'|'test' }.
+app.post('/api/runs/dispatch', async (req, res, next) => {
+  try {
+    if (!has.githubDispatch()) {
+      return res.status(503).json({
+        error: 'on-demand runs are not configured: set GITHUB_TOKEN and GITHUB_REPO',
+      });
+    }
+    const mode = req.body?.mode === 'live' ? 'live' : 'test'; // default to safe test mode
+    const source = String(req.body?.source ?? 'all').trim() || 'all';
+    const onlySources = source === 'all' ? undefined : [source];
+
+    const run = await enqueueRun(mode, onlySources);
+    await dispatchWorkflow({ run_id: run.runId, source, mode });
     res.json({ runId: run.runId, mode: run.mode, status: run.status });
   } catch (err) {
     next(err);

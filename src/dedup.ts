@@ -42,3 +42,17 @@ export function keyAll(candidates: ProductCandidate[]): KeyedCandidate[] {
   }
   return [...seen.values()];
 }
+
+/**
+ * Pure core of the fan-in overseer: key all candidates (de-duping ACROSS the
+ * parallel sources), then split into new vs already-known against `existing`.
+ * No I/O, so it's the piece worth a self-check (see agent/orchestrator.check.ts).
+ */
+export function summarize(
+  all: ProductCandidate[],
+  existing: Set<string>,
+): { keyed: KeyedCandidate[]; fresh: KeyedCandidate[]; knownCount: number } {
+  const keyed = keyAll(all);
+  const fresh = keyed.filter((k) => !existing.has(k.dedupKey));
+  return { keyed, fresh, knownCount: keyed.length - fresh.length };
+}

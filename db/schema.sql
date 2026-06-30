@@ -61,6 +61,21 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE INDEX IF NOT EXISTS idx_runs_queued  ON runs (created_at) WHERE status = 'queued';
 CREATE INDEX IF NOT EXISTS idx_runs_created ON runs (created_at DESC);
 
+-- Per-source results for a fan-out run. Each source runs as its own parallel
+-- GitHub Actions matrix job (the "gather" phase) and writes ONLY its own row
+-- here -- it never touches `products`. The single "aggregate" overseer job then
+-- reads every row for the run, de-dupes across sources, and does the one product
+-- write. One row per (run_id, source) means the parallel jobs never contend.
+CREATE TABLE IF NOT EXISTS run_source_results (
+    run_id      UUID NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    source      TEXT NOT NULL,
+    candidates  JSONB NOT NULL DEFAULT '[]',   -- this source's ProductCandidate[]
+    status      TEXT NOT NULL DEFAULT 'done' CHECK (status IN ('done', 'error')),
+    error       TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (run_id, source)
+);
+
 -- Per-source credentials for user-added sources. Replaces data/credentials.json
 -- (no filesystem writes on serverless). Values are stored as a JSON object of
 -- { [field]: value }; field NAMES are public, values are secret.
@@ -82,3 +97,16 @@ CREATE TABLE IF NOT EXISTS custom_sources (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Row-Level Security. This service talks to Postgres DIRECTLY via DATABASE_URL
+-- (the `postgres` role, which BYPASSES RLS) and never uses Supabase's auto-
+-- generated REST API. Enabling RLS with NO policies denies all anon/REST access
+-- to these tables while the direct connection keeps working untouched — which
+-- closes the public surface Supabase warns about (notably source_credentials).
+-- Safe to re-run; harmless if you later add policies. If you ever DO want REST
+-- access, add explicit policies per table instead of turning this off.
+ALTER TABLE products           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE runs               ENABLE ROW LEVEL SECURITY;
+ALTER TABLE run_source_results ENABLE ROW LEVEL SECURITY;
+ALTER TABLE source_credentials ENABLE ROW LEVEL SECURITY;
+ALTER TABLE custom_sources     ENABLE ROW LEVEL SECURITY;

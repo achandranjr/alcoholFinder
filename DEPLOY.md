@@ -9,9 +9,16 @@ This deploys the whole system on free tiers with **no always-on server**:
 | Discovery (the long job) | **GitHub Actions** cron, 2×/day | Free |
 
 Discovery does **not** run on Vercel. Vercel only serves the dashboard and a thin
-read/enqueue API; the actual ~10-min pipeline runs in a scheduled GitHub Actions
-job (`.github/workflows/discover.yml`) via `npm run discover`, which writes its
-results to Supabase. The dashboard is a read-only monitor of those runs.
+read/dispatch API; the actual work runs in GitHub Actions
+(`.github/workflows/discover.yml`), which writes results to Supabase.
+
+The workflow **fans out**: a `plan` job lists the enabled sources, a `gather`
+matrix runs each source as its own parallel job (writing only its own
+candidates), and a single `aggregate` overseer then de-dupes across all sources
+and does the one product write. It runs on a schedule (all sources) **and** on
+demand — the dashboard's per-source "run" buttons (and "Run all") call GitHub's
+`workflow_dispatch` API to trigger a run for one source (or all), then poll it
+live. Custom DB-added sources are dispatchable the same way.
 
 > **Assumption:** the `alcohol-discovery/` folder is your **git repo root** (the
 > same thing Vercel deploys). If you instead push the parent folder, see the
@@ -25,7 +32,9 @@ results to Supabase. The dashboard is a read-only monitor of those runs.
    near you and set a database password (save it).
 2. **Create the tables.** Open **SQL Editor**, paste the contents of
    [`db/schema.sql`](db/schema.sql), and run it. (Or locally:
-   `psql "$DATABASE_URL" -f db/schema.sql`.)
+   `psql "$DATABASE_URL" -f db/schema.sql`.) It's idempotent (`CREATE … IF NOT
+   EXISTS`), so re-run it after pulling changes — the fan-out flow adds a
+   `run_source_results` table that an older database won't have.
 3. **Get the connection string.** Click the **Connect** button in the top bar of
    the dashboard (next to the project name) to open the connection dialog. Under
    **Connection string**, pick the **Transaction pooler** (port **6543**) — this
@@ -93,6 +102,9 @@ results to Supabase. The dashboard is a read-only monitor of those runs.
    | Variable | Required? | Notes |
    | --- | --- | --- |
    | `DATABASE_URL` | **Yes** | Same Supabase pooler URL. |
+   | `GITHUB_TOKEN` | For on-demand runs | A fine-grained PAT with **Actions: read and write** on this repo. Lets the dashboard's "run" buttons dispatch the workflow. Without it the buttons return a clear "not configured" error. |
+   | `GITHUB_REPO` | For on-demand runs | `owner/name` of this repo, e.g. `you/alcohol-discovery`. |
+   | `GITHUB_REF` | Optional | Branch the workflow lives on. Defaults to `main`. |
    | `ANTHROPIC_API_KEY` | Optional | Only needed for the dashboard's **Add source → Analyze** feature. |
    | `COLACLOUD_API_KEY` | Optional | Not used by the web layer; harmless to set. |
 
@@ -143,14 +155,13 @@ GitHub secret to a cheaper model to trim it) and any COLA Cloud subscription.
 
 ## Things that intentionally don't exist here
 
-- **No always-on worker.** Discovery is the scheduled GitHub job, full stop.
-- **No on-demand "Run" buttons** on the dashboard — those required a worker to
-  claim queued runs. The dashboard is now read-only. To run discovery off-schedule,
-  use **Actions → Discovery → Run workflow**, or run `npm run discover` locally.
-
-If you later want on-demand runs from the dashboard, the path is: have the Vercel
-API call GitHub's `workflow_dispatch` endpoint, and have the workflow claim the
-queued run (`claimNextRun`) instead of starting a fresh one.
+- **No always-on worker.** Discovery is GitHub Actions, full stop — scheduled, or
+  dispatched on demand from the dashboard. The polling worker (`src/worker.ts`)
+  is left for local `npm run worker` only; the deployed flow doesn't use it.
+- On-demand runs need `GITHUB_TOKEN` + `GITHUB_REPO` on Vercel (above). Without
+  them the dashboard "run" buttons just report "not configured" — the schedule
+  still works. You can also always trigger from **Actions → Discovery → Run
+  workflow**, or run `npm run discover` locally.
 
 ---
 

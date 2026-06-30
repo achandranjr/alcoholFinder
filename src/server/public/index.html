@@ -150,7 +150,8 @@
       <p>number 1 promoter of alcoholism and cirrhosis</p>
     </div>
     <div class="controls">
-      <span class="sched-note">Discovery runs automatically<br>8 AM &amp; 8 PM CT</span>
+      <span class="sched-note">Auto 8 AM &amp; 8 PM CT<br>or run on demand →</span>
+      <button id="btn-run-all" class="primary" title="run every enabled source now (live)">▶ Run all</button>
       <button id="btn-refresh">↻ Refresh</button>
     </div>
   </header>
@@ -292,9 +293,24 @@ async function loadSources() {
       <span class="slabel" title="${esc(s.id)}">${esc(s.label)}</span>
       <span class="right">
         ${s.kind ? `<span class="kind-pill">${esc(s.kind)}</span>` : ''}
-        <span class="kind-pill" title="${s.enabled ? 'has the credentials it needs' : 'missing credentials / key'}">${s.enabled ? 'enabled' : 'disabled'}</span>
+        <button class="mini" onclick="runSource('${esc(s.id)}','test')" ${s.enabled ? '' : 'disabled'} title="dry-run — writes nothing">test</button>
+        <button class="mini" onclick="runSource('${esc(s.id)}','live')" ${s.enabled ? '' : 'disabled'} title="live — persists new products">run</button>
       </span>
     </li>`).join('') || '<li class="empty">No sources registered.</li>';
+}
+
+// Fire an on-demand run (one source id, or "all") and follow it live. The work
+// runs in GitHub Actions; this just dispatches and polls the returned run row.
+async function runSource(id, mode) {
+  const res = await fetch('/api/runs/dispatch', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source: id, mode })
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) { srcStatus('Run failed: ' + (body.error || res.statusText), true); return; }
+  srcStatus(`Dispatched ${mode} run for ${id} — it can take a few seconds to start.`);
+  select(body.runId);
+  loadRuns();
 }
 
 function srcStatus(msg, isErr) {
@@ -384,6 +400,7 @@ $('btn-analyze').onclick = analyzeSource;
 $('src-url').addEventListener('keydown', (e) => { if (e.key === 'Enter') analyzeSource(); });
 
 $('btn-refresh').onclick = refresh;
+$('btn-run-all').onclick = () => runSource('all', 'live');
 refresh();
 loadSources();
 </script>

@@ -1,6 +1,14 @@
 import { enabledSources } from '../sources/index.js';
-import { keyAll } from '../dedup.js';
-import { findExistingKeys, insertProducts, saveRun, createRunningRun } from '../db.js';
+import { keyAll, summarize } from '../dedup.js';
+import {
+  findExistingKeys,
+  insertProducts,
+  saveRun,
+  createRunningRun,
+  appendRunLog,
+  saveSourceResult,
+  loadSourceResults,
+} from '../db.js';
 import type { RunResult, Source, DiscoveryBudget } from '../types.js';
 
 export interface DiscoverOptions {
@@ -101,5 +109,92 @@ export async function runPipeline(run: RunResult, opts: DiscoverOptions): Promis
     log(`FATAL ${run.error}`);
   } finally {
     await flush();
+  }
+}
+
+/* --------------------------------------------------------- fan-out / fan-in path
+
+ * The split version of the pipeline above, for the parallel GitHub Actions flow:
+ *   gatherOneSource()  -> one per source, run as parallel matrix jobs
+ *   aggregateRun()     -> the single overseer job: dedup + ONE write + finalize
+ * Each gather job writes only its own source's candidates to run_source_results
+ * and never touches `products`; the overseer holds all results until every job
+ * has finished (GitHub's `needs:`), then does the single product write.
+ * ------------------------------------------------------------------------------ */
+
+function budgetFor(opts: DiscoverOptions): DiscoveryBudget {
+  const timeoutMs = opts.timeoutMs ?? (opts.test ? 90_000 : 10 * 60_000);
+  return {
+    maxCandidates: opts.test ? 8 : 100,
+    deadline: Date.now() + timeoutMs,
+    test: opts.test,
+  };
+}
+
+/** One source's gather step (a single parallel matrix job). */
+export async function gatherOneSource(
+  runId: string,
+  sourceId: string,
+  opts: DiscoverOptions,
+): Promise<void> {
+  const src = enabledSources().find((s) => s.id === sourceId);
+  if (!src) {
+    await saveSourceResult(runId, sourceId, [], 'error', `source not enabled or unknown: ${sourceId}`);
+    await appendRunLog(runId, `${sourceId}: ERROR not enabled or unknown`);
+    return;
+  }
+  try {
+    const found = await src.discover(budgetFor(opts));
+    await saveSourceResult(runId, sourceId, found, 'done', null);
+    await appendRunLog(runId, `${sourceId}: ${found.length} candidates`);
+  } catch (err) {
+    const msg = (err as Error).message;
+    await saveSourceResult(runId, sourceId, [], 'error', msg);
+    await appendRunLog(runId, `${sourceId}: ERROR ${msg}`);
+  }
+}
+
+/**
+ * The overseer. Runs once after every gather job, even if some failed: it reads
+ * whatever each source stored, de-dupes across all of them, does the single
+ * existing-key read + single product write (LIVE only), and finalizes the run.
+ */
+export async function aggregateRun(run: RunResult, opts: DiscoverOptions): Promise<void> {
+  const log = (m: string) => run.log.push(`[${new Date().toISOString()}] ${m}`);
+  try {
+    const results = await loadSourceResults(run.runId);
+    run.sourcesRun = results.filter((r) => r.status === 'done').map((r) => r.source);
+
+    const all = results.flatMap((r) => r.candidates);
+    // Key once to ask the DB which already exist, then summarize() against that.
+    // ponytail: summarize re-keys (one extra O(n) pass on a few hundred rows) —
+    // fine at this scale; collapse into one pass if candidate volume explodes.
+    const existing = await findExistingKeys(keyAll(all).map((k) => k.dedupKey));
+    const { keyed, fresh, knownCount } = summarize(all, existing);
+    run.candidates = keyed.length;
+    run.newProducts = fresh;
+    run.knownCount = knownCount;
+    log(`candidates=${keyed.length} new=${fresh.length} known=${knownCount}`);
+
+    if (opts.test) {
+      log('TEST MODE: skipping all product writes.');
+    } else {
+      const inserted = await insertProducts(fresh);
+      log(`persisted ${inserted} new products`);
+    }
+
+    // Surface any source that failed, but the run as a whole still succeeds.
+    const failed = results.filter((r) => r.status === 'error');
+    run.status = failed.length === results.length && results.length > 0 ? 'error' : 'done';
+    if (failed.length) {
+      run.error = `${failed.length} source(s) failed: ${failed.map((r) => r.source).join(', ')}`;
+    }
+  } catch (err) {
+    run.status = 'error';
+    run.error = (err as Error).message;
+    log(`FATAL ${run.error}`);
+  } finally {
+    run.finishedAt = new Date().toISOString();
+    await saveRun(run);
   }
 }

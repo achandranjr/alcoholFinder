@@ -1,6 +1,6 @@
 import pg from 'pg';
 import { config } from './config.js';
-import type { KeyedCandidate, RunResult } from './types.js';
+import type { KeyedCandidate, ProductCandidate, RunResult } from './types.js';
 
 // Supabase (and most hosted Postgres) require TLS; local Postgres usually does
 // not. Auto-detect from the host so the same code works in dev and on Vercel.
@@ -195,6 +195,77 @@ export async function listRuns(limit = 50): Promise<RunResult[]> {
     [limit],
   );
   return rows.map(rowToRun);
+}
+
+/** Flip a queued run to running (the fan-out 'plan' job, picking up a dispatch). */
+export async function markRunStarted(runId: string): Promise<void> {
+  await pool.query(
+    `UPDATE runs SET status = 'running',
+       started_at = COALESCE(started_at, now()),
+       claimed_at = COALESCE(claimed_at, now())
+     WHERE run_id = $1 AND status = 'queued'`,
+    [runId],
+  );
+}
+
+/**
+ * Atomically append one line to a run's log. Used by the parallel gather jobs to
+ * surface per-source progress live. A single `||` UPDATE is race-safe under the
+ * row lock, so concurrent appends from sibling matrix jobs never clobber.
+ */
+export async function appendRunLog(runId: string, line: string): Promise<void> {
+  await pool.query(
+    `UPDATE runs SET log = log || to_jsonb($2::text) WHERE run_id = $1`,
+    [runId, `[${new Date().toISOString()}] ${line}`],
+  );
+}
+
+/* ------------------------------------------------- per-source (fan-out) results */
+
+export interface SourceResult {
+  source: string;
+  candidates: ProductCandidate[];
+  status: 'done' | 'error';
+  error?: string;
+}
+
+/** A gather job stores its own source's candidates. Never writes to `products`. */
+export async function saveSourceResult(
+  runId: string,
+  source: string,
+  candidates: ProductCandidate[],
+  status: 'done' | 'error',
+  error: string | null,
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO run_source_results (run_id, source, candidates, status, error)
+       VALUES ($1, $2, $3::jsonb, $4, $5)
+     ON CONFLICT (run_id, source) DO UPDATE
+       SET candidates = EXCLUDED.candidates,
+           status = EXCLUDED.status,
+           error = EXCLUDED.error,
+           created_at = now()`,
+    [runId, source, JSON.stringify(candidates), status, error],
+  );
+}
+
+/** The overseer reads every source's results to dedup + write once. */
+export async function loadSourceResults(runId: string): Promise<SourceResult[]> {
+  const { rows } = await pool.query<{
+    source: string;
+    candidates: ProductCandidate[] | null;
+    status: 'done' | 'error';
+    error: string | null;
+  }>(
+    'SELECT source, candidates, status, error FROM run_source_results WHERE run_id = $1 ORDER BY source',
+    [runId],
+  );
+  return rows.map((r) => ({
+    source: r.source,
+    candidates: r.candidates ?? [],
+    status: r.status,
+    error: r.error ?? undefined,
+  }));
 }
 
 /* -------------------------------------------------------------- credentials */

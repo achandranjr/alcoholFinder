@@ -1,51 +1,104 @@
 name: Discovery
 
-# Runs the discovery pipeline on a schedule, replacing the always-on worker.
-# The CLI (`npm run discover`) runs the SAME pipeline inline as the worker would
-# (src/cli.ts -> orchestrator.discover), creating a `runs` row and flushing
-# progress to Supabase — so the Vercel dashboard still shows status/history.
+# Fan-out / fan-in discovery. Instead of one job running every source in series,
+# a `plan` job resolves the enabled source list, a `gather` matrix runs each
+# source as its own PARALLEL job (writing only its own candidates), and a single
+# `aggregate` overseer then de-dupes across all sources and does the one DB write.
 #
-# GitHub Actions jobs may run up to 6h, so the pipeline's ~10-min cap is fine.
+# Triggered on a schedule (all sources, live) and via workflow_dispatch — the
+# dashboard's per-source "Run" buttons hit the GitHub API to dispatch this with a
+# specific `source` + `run_id`, so a custom DB-added source is runnable too.
 
 on:
   schedule:
-    # IMPORTANT: GitHub Actions cron is always UTC and does NOT observe daylight
-    # saving. These are set for US Central DAYLIGHT time (CDT, UTC-5) = 8 AM / 8 PM CT.
-    #   8 AM CDT = 13:00 UTC      8 PM CDT = 01:00 UTC (next day)
-    # When CT falls back to STANDARD time (CST, UTC-6) in early November, shift
-    # both one hour later: '0 14 * * *' (8 AM) and '0 2 * * *' (8 PM). Revert in spring.
+    # GitHub Actions cron is UTC and ignores DST. Set for US Central DAYLIGHT
+    # time (CDT, UTC-5) = 8 AM / 8 PM CT. In November (CST, UTC-6) shift both an
+    # hour later: '0 14 * * *' and '0 2 * * *'.
     - cron: '0 13 * * *'   # 8 AM CT
     - cron: '0 1 * * *'    # 8 PM CT
-  workflow_dispatch:        # also allow a manual "Run workflow" from the Actions tab
+  workflow_dispatch:
+    inputs:
+      source:
+        description: 'Source id to run, or "all"'
+        default: 'all'
+      mode:
+        description: 'live (writes new products) or test (dry-run)'
+        default: 'live'
+      run_id:
+        description: 'Existing run row to attach to (set by the dashboard; leave blank to create one)'
+        default: ''
 
-# Don't let a slow run overlap with the next scheduled one.
+# Scope concurrency per run so a manual single-source run never blocks the
+# scheduled all-sources run (or vice versa).
 concurrency:
-  group: discovery
+  group: discovery-${{ github.event.inputs.run_id || github.run_id }}
   cancel-in-progress: false
 
 permissions:
   contents: read
 
+env:
+  DATABASE_URL: ${{ secrets.DATABASE_URL }}
+  # Optional — a source whose key is missing is simply not "enabled", so `plan`
+  # leaves it out of the matrix.
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+  COLACLOUD_API_KEY: ${{ secrets.COLACLOUD_API_KEY }}
+
 jobs:
-  discover:
+  plan:
     runs-on: ubuntu-latest
-    timeout-minutes: 20      # headroom over the pipeline's internal ~10-min deadline
+    timeout-minutes: 5
+    outputs:
+      run_id: ${{ steps.plan.outputs.run_id }}
+      sources: ${{ steps.plan.outputs.sources }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+      - run: npm ci --ignore-scripts
+      - id: plan
+        run: |
+          OUT=$(npm run --silent plan -- \
+            --source="${{ github.event.inputs.source || 'all' }}" \
+            --mode="${{ github.event.inputs.mode || 'live' }}" \
+            --run-id="${{ github.event.inputs.run_id }}")
+          echo "$OUT" | jq -e . >/dev/null   # fail loudly if plan didn't emit JSON
+          echo "run_id=$(echo "$OUT" | jq -r '.run_id')" >> "$GITHUB_OUTPUT"
+          echo "sources=$(echo "$OUT" | jq -c '.sources')" >> "$GITHUB_OUTPUT"
 
-      # Disable install scripts — matches the repo's supply-chain hygiene (README).
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
+  gather:
+    needs: plan
+    # Skip cleanly when nothing is enabled (empty matrix would otherwise error).
+    if: ${{ needs.plan.outputs.sources != '' && needs.plan.outputs.sources != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false   # one bad source must not cancel its siblings
+      matrix:
+        source: ${{ fromJSON(needs.plan.outputs.sources) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run --silent gather -- --run-id="${{ needs.plan.outputs.run_id }}" --source="${{ matrix.source }}"
 
-      - name: Run live discovery
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          # Optional — sources with a missing key are skipped automatically.
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          COLACLOUD_API_KEY: ${{ secrets.COLACLOUD_API_KEY }}
-        run: npm run discover
+  aggregate:
+    needs: [plan, gather]
+    # Always run the overseer — even if some (or all) gather jobs failed — so
+    # partial results are still de-duped and written, and the run is finalized.
+    if: ${{ always() && needs.plan.outputs.run_id != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run --silent aggregate -- --run-id="${{ needs.plan.outputs.run_id }}"
